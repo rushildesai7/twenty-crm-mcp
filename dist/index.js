@@ -26,6 +26,15 @@ function fieldToJsonSchema(field) {
     case "TEXT":
     case "RICH_TEXT":
       return { type: "string", description: desc };
+    case "RICH_TEXT_V2":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          blocknote: { type: "string", description: "BlockNote JSON content" },
+          markdown: { type: "string", description: "Markdown content" }
+        }
+      };
     case "NUMBER":
     case "POSITION":
       return { type: "number", description: desc };
