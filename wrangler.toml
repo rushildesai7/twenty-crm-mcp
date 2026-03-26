@@ -3,7 +3,5 @@ main = "worker.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Secrets (set via `wrangler secret put`):
-# - TWENTY_API_KEY
-# - TWENTY_BASE_URL
-# - MCP_API_KEY
+[secrets]
+required = ["TWENTY_API_KEY", "TWENTY_BASE_URL", "MCP_API_KEY"]
