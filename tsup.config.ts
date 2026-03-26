@@ -8,6 +8,7 @@ export default defineConfig({
   format: "esm",
   bundle: true,
   splitting: false,
+  noExternal: [/.*/],
   target: "node18",
   platform: "node",
   sourcemap: false,
