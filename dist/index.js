@@ -4,635 +4,371 @@ import { createRequire } from 'module'; const require = createRequire(import.met
 // index.ts
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+// src/schema.ts
+function toSnakeCase(str) {
+  return str.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+var SKIP_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "RELATION",
+  "ACTOR",
+  "TS_VECTOR",
+  "MORPH_RELATION",
+  "FILES"
+]);
+async function fetchSchema(makeRequest2) {
+  const res = await makeRequest2("/rest/metadata/objects");
+  const objects2 = res?.data?.objects ?? res?.objects ?? [];
+  return objects2.filter((obj) => obj.isActive && !obj.isSystem);
+}
+function fieldToJsonSchema(field) {
+  const desc = field.description ? `${field.label} \u2014 ${field.description}` : field.label;
+  switch (field.type) {
+    case "TEXT":
+    case "RICH_TEXT":
+      return { type: "string", description: desc };
+    case "NUMBER":
+    case "POSITION":
+      return { type: "number", description: desc };
+    case "NUMERIC":
+      return { type: "string", description: `${desc} (numeric string for precision)` };
+    case "BOOLEAN":
+      return { type: "boolean", description: desc };
+    case "DATE":
+      return { type: "string", description: `${desc} (ISO 8601 date, e.g. 2024-01-15)` };
+    case "DATE_TIME":
+      return { type: "string", description: `${desc} (ISO 8601 datetime, e.g. 2024-01-15T09:00:00Z)` };
+    case "UUID":
+      return { type: "string", description: `${desc} (UUID)` };
+    case "SELECT": {
+      const values = (field.options ?? []).map((o) => o.value);
+      return values.length > 0 ? { type: "string", enum: values, description: desc } : { type: "string", description: desc };
+    }
+    case "MULTI_SELECT": {
+      const values = (field.options ?? []).map((o) => o.value);
+      return values.length > 0 ? { type: "array", items: { type: "string", enum: values }, description: desc } : { type: "array", items: { type: "string" }, description: desc };
+    }
+    case "RATING":
+      return {
+        type: "string",
+        enum: ["RATING_1", "RATING_2", "RATING_3", "RATING_4", "RATING_5"],
+        description: desc
+      };
+    case "CURRENCY":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          amountMicros: { type: "number", description: "Amount in micros (1 dollar = 1000000)" },
+          currencyCode: { type: "string", description: "ISO currency code (e.g. USD, EUR)" }
+        }
+      };
+    case "LINKS":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          primaryLinkUrl: { type: "string", description: "Primary URL" },
+          primaryLinkLabel: { type: "string", description: "Primary link label" }
+        }
+      };
+    case "ADDRESS":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          addressStreet1: { type: "string", description: "Street line 1" },
+          addressStreet2: { type: "string", description: "Street line 2" },
+          addressCity: { type: "string", description: "City" },
+          addressState: { type: "string", description: "State/Province" },
+          addressCountry: { type: "string", description: "Country" },
+          addressPostcode: { type: "string", description: "Postal code" },
+          addressLat: { type: "number", description: "Latitude" },
+          addressLng: { type: "number", description: "Longitude" }
+        }
+      };
+    case "PHONES":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          primaryPhoneNumber: { type: "string", description: "Primary phone number" },
+          primaryPhoneCountryCode: { type: "string", description: "Country code (e.g. +1)" },
+          additionalPhones: { type: "array", items: { type: "string" }, description: "Additional phone numbers" }
+        }
+      };
+    case "EMAILS":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          primaryEmail: { type: "string", description: "Primary email address" },
+          additionalEmails: { type: "array", items: { type: "string" }, description: "Additional email addresses" }
+        }
+      };
+    case "FULL_NAME":
+      return {
+        type: "object",
+        description: desc,
+        properties: {
+          firstName: { type: "string", description: "First name" },
+          lastName: { type: "string", description: "Last name" }
+        }
+      };
+    case "ARRAY":
+      return { type: "array", items: { type: "string" }, description: desc };
+    case "RAW_JSON":
+      return { type: "object", description: desc };
+    default:
+      return null;
+  }
+}
+function getWritableFields(fields) {
+  return fields.filter(
+    (f) => f.isActive && !f.isSystem && !SKIP_FIELD_TYPES.has(f.type)
+  );
+}
+function buildPropertiesSchema(fields) {
+  const properties = {};
+  const required = [];
+  for (const field of fields) {
+    const schema = fieldToJsonSchema(field);
+    if (!schema) continue;
+    properties[field.name] = schema;
+    if (!field.isNullable && field.defaultValue === void 0) {
+      required.push(field.name);
+    }
+  }
+  return { properties, required };
+}
+function generateTools(objects2) {
+  const tools2 = [];
+  const dispatch2 = /* @__PURE__ */ new Map();
+  for (const obj of objects2) {
+    const singular = toSnakeCase(obj.nameSingular);
+    const plural = toSnakeCase(obj.namePlural);
+    const endpoint = `/rest/${obj.namePlural}`;
+    const writableFields = getWritableFields(obj.fields);
+    const { properties, required } = buildPropertiesSchema(writableFields);
+    const base = {
+      endpoint,
+      labelSingular: obj.labelSingular,
+      labelPlural: obj.labelPlural
+    };
+    const createName = `create_${singular}`;
+    tools2.push({
+      name: createName,
+      description: `Create a new ${obj.labelSingular} in Twenty CRM`,
+      inputSchema: {
+        type: "object",
+        properties,
+        ...required.length > 0 ? { required } : {}
+      }
+    });
+    dispatch2.set(createName, { action: "create", ...base });
+    const getName = `get_${singular}`;
+    tools2.push({
+      name: getName,
+      description: `Get a ${obj.labelSingular} by ID`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: `${obj.labelSingular} ID` }
+        },
+        required: ["id"]
+      }
+    });
+    dispatch2.set(getName, { action: "get", ...base });
+    const updateName = `update_${singular}`;
+    tools2.push({
+      name: updateName,
+      description: `Update an existing ${obj.labelSingular}`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: `${obj.labelSingular} ID` },
+          ...properties
+        },
+        required: ["id"]
+      }
+    });
+    dispatch2.set(updateName, { action: "update", ...base });
+    const listName = `list_${plural}`;
+    tools2.push({
+      name: listName,
+      description: `List ${obj.labelPlural} with optional filtering and pagination`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Max results to return (default: 20)" },
+          offset: { type: "number", description: "Number of results to skip (default: 0)" },
+          search: { type: "string", description: "Search term" },
+          filter: { type: "object", description: "Field-level filters as { fieldName: value } pairs" },
+          order_by: { type: "string", description: "Field name to order by" },
+          order_direction: { type: "string", enum: ["AscNullsFirst", "AscNullsLast", "DescNullsFirst", "DescNullsLast"], description: "Sort direction" }
+        }
+      }
+    });
+    dispatch2.set(listName, { action: "list", ...base });
+    const deleteName = `delete_${singular}`;
+    tools2.push({
+      name: deleteName,
+      description: `Delete a ${obj.labelSingular} from Twenty CRM`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: `${obj.labelSingular} ID to delete` }
+        },
+        required: ["id"]
+      }
+    });
+    dispatch2.set(deleteName, { action: "delete", ...base });
+  }
+  const searchName = "search_records";
+  tools2.push({
+    name: searchName,
+    description: "Search across multiple object types in Twenty CRM",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        object_types: {
+          type: "array",
+          items: { type: "string" },
+          description: `Object types to search (available: ${objects2.map((o) => o.namePlural).join(", ")})`
+        },
+        limit: { type: "number", description: "Results per object type (default: 10)" }
+      },
+      required: ["query"]
+    }
+  });
+  dispatch2.set(searchName, {
+    action: "search",
+    endpoint: "/rest",
+    labelSingular: "Record",
+    labelPlural: "Records"
+  });
+  return { tools: tools2, dispatch: dispatch2 };
+}
+
 // src/server.ts
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-function createServer({ apiKey, baseUrl = "https://api.twenty.com" }) {
-  if (!apiKey) {
-    throw new Error("apiKey is required");
-  }
+function createServer({
+  apiKey: apiKey2,
+  baseUrl: baseUrl2 = "https://api.twenty.com",
+  tools: tools2,
+  dispatch: dispatch2
+}) {
+  if (!apiKey2) throw new Error("apiKey is required");
   const server2 = new Server(
-    { name: "twenty-crm", version: "1.1.0" },
+    { name: "twenty-crm", version: "2.0.0" },
     { capabilities: { tools: {} } }
   );
-  async function makeRequest(endpoint, method = "GET", data = null) {
-    const url = `${baseUrl}${endpoint}`;
+  async function makeRequest2(endpoint, method = "GET", data = null) {
+    const url = `${baseUrl2}${endpoint}`;
     const options = {
       method,
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiKey2}`,
         "Content-Type": "application/json"
       }
     };
     if (data && (method === "POST" || method === "PUT" || method === "PATCH")) {
       options.body = JSON.stringify(data);
     }
-    try {
-      const response = await fetch(url, options);
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    return response.json();
+  }
+  async function createRecord(endpoint, label, data) {
+    const result = await makeRequest2(endpoint, "POST", data);
+    return {
+      content: [{ type: "text", text: `Created ${label}: ${JSON.stringify(result, null, 2)}` }]
+    };
+  }
+  async function getRecord(endpoint, label, id) {
+    const result = await makeRequest2(`${endpoint}/${id}`);
+    return {
+      content: [{ type: "text", text: `${label} details: ${JSON.stringify(result, null, 2)}` }]
+    };
+  }
+  async function updateRecord(endpoint, label, id, data) {
+    const result = await makeRequest2(`${endpoint}/${id}`, "PATCH", data);
+    return {
+      content: [{ type: "text", text: `Updated ${label}: ${JSON.stringify(result, null, 2)}` }]
+    };
+  }
+  async function listRecords(endpoint, label, params) {
+    const { limit = 20, offset = 0, search, filter, order_by, order_direction } = params;
+    let url = `${endpoint}?limit=${limit}&offset=${offset}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+    if (order_by) url += `&order_by=${encodeURIComponent(order_by)}`;
+    if (order_direction) url += `&order_direction=${encodeURIComponent(order_direction)}`;
+    if (filter && typeof filter === "object") {
+      for (const [key, value] of Object.entries(filter)) {
+        url += `&filter[${encodeURIComponent(key)}]=${encodeURIComponent(String(value))}`;
       }
-      return await response.json();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`API request failed: ${msg}`);
     }
+    const result = await makeRequest2(url);
+    return {
+      content: [{ type: "text", text: `${label} list: ${JSON.stringify(result, null, 2)}` }]
+    };
   }
-  function mapPersonData(data) {
-    const mapped = {};
-    if (data.firstName !== void 0 || data.lastName !== void 0) {
-      const name = {};
-      if (data.firstName !== void 0) name.firstName = data.firstName;
-      if (data.lastName !== void 0) name.lastName = data.lastName;
-      mapped.name = name;
-    }
-    if (data.email !== void 0) mapped.emails = { primaryEmail: data.email };
-    if (data.phone !== void 0) mapped.phones = { primaryPhoneNumber: data.phone };
-    if (data.linkedinUrl !== void 0) mapped.linkedinLink = { primaryLinkUrl: data.linkedinUrl };
-    if (data.jobTitle !== void 0) mapped.jobTitle = data.jobTitle;
-    if (data.city !== void 0) mapped.city = data.city;
-    if (data.companyId !== void 0) mapped.companyId = data.companyId;
-    if (data.avatarUrl !== void 0) mapped.avatarUrl = data.avatarUrl;
-    return mapped;
-  }
-  function mapCompanyData(data) {
-    const mapped = {};
-    if (data.name !== void 0) mapped.name = data.name;
-    if (data.employees !== void 0) mapped.employees = data.employees;
-    if (data.idealCustomerProfile !== void 0) mapped.idealCustomerProfile = data.idealCustomerProfile;
-    if (data.position !== void 0) mapped.position = data.position;
-    if (data.accountOwnerId !== void 0) mapped.accountOwnerId = data.accountOwnerId;
-    if (data.stageFocus !== void 0) mapped.stageFocus = data.stageFocus;
-    if (data.fundType !== void 0) mapped.fundType = data.fundType;
-    if (data.hasFellowshipAccelerator !== void 0) mapped.hasFellowshipAccelerator = data.hasFellowshipAccelerator;
-    if (data.domainName !== void 0) {
-      mapped.domainName = { primaryLinkLabel: "", primaryLinkUrl: data.domainName, secondaryLinks: [] };
-    }
-    if (data.linkedinUrl !== void 0) {
-      mapped.linkedinLink = { primaryLinkLabel: "", primaryLinkUrl: data.linkedinUrl, secondaryLinks: [] };
-    }
-    if (data.xUrl !== void 0) {
-      mapped.xLink = { primaryLinkLabel: "", primaryLinkUrl: data.xUrl, secondaryLinks: [] };
-    }
-    if (data.address !== void 0) {
-      mapped.address = {
-        addressStreet1: data.address,
-        addressStreet2: "",
-        addressCity: "",
-        addressPostcode: "",
-        addressState: "",
-        addressCountry: "",
-        addressLat: null,
-        addressLng: null
-      };
-    }
-    if (data.annualRecurringRevenue !== void 0) {
-      mapped.annualRecurringRevenue = {
-        amountMicros: String(Math.round(data.annualRecurringRevenue * 1e6)),
-        currencyCode: data.currencyCode || "USD"
-      };
-    }
-    return mapped;
-  }
-  function mapNoteData(data) {
-    const mapped = {};
-    if (data.title !== void 0) mapped.title = data.title;
-    if (data.body !== void 0) mapped.bodyV2 = data.body;
-    if (data.position !== void 0) mapped.position = data.position;
-    return mapped;
-  }
-  function mapTaskData(data) {
-    const mapped = {};
-    if (data.title !== void 0) mapped.title = data.title;
-    if (data.body !== void 0) mapped.bodyV2 = data.body;
-    if (data.dueAt !== void 0) mapped.dueAt = data.dueAt;
-    if (data.status !== void 0) mapped.status = data.status;
-    if (data.assigneeId !== void 0) mapped.assigneeId = data.assigneeId;
-    if (data.position !== void 0) mapped.position = data.position;
-    return mapped;
-  }
-  async function createPerson(data) {
-    const mapped = mapPersonData(data);
-    const result = await makeRequest("/rest/people", "POST", mapped);
-    return { content: [{ type: "text", text: `Created person: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function getPerson(id) {
-    const result = await makeRequest(`/rest/people/${id}`);
-    return { content: [{ type: "text", text: `Person details: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function updatePerson(data) {
-    const { id, ...updateData } = data;
-    const mapped = mapPersonData(updateData);
-    const result = await makeRequest(`/rest/people/${id}`, "PUT", mapped);
-    return { content: [{ type: "text", text: `Updated person: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function listPeople(params = {}) {
-    const { limit = 20, offset = 0, search, companyId } = params;
-    let endpoint = `/rest/people?limit=${limit}&offset=${offset}`;
-    if (search) endpoint += `&search=${encodeURIComponent(search)}`;
-    if (companyId) endpoint += `&companyId=${companyId}`;
-    const result = await makeRequest(endpoint);
-    return { content: [{ type: "text", text: `People list: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function deletePerson(id) {
-    await makeRequest(`/rest/people/${id}`, "DELETE");
-    return { content: [{ type: "text", text: `Successfully deleted person with ID: ${id}` }] };
-  }
-  async function createCompany(data) {
-    const mapped = mapCompanyData(data);
-    const result = await makeRequest("/rest/companies", "POST", mapped);
-    return { content: [{ type: "text", text: `Created company: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function getCompany(id) {
-    const result = await makeRequest(`/rest/companies/${id}`);
-    return { content: [{ type: "text", text: `Company details: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function updateCompany(data) {
-    const { id, ...updateData } = data;
-    const mapped = mapCompanyData(updateData);
-    const result = await makeRequest(`/rest/companies/${id}`, "PUT", mapped);
-    return { content: [{ type: "text", text: `Updated company: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function listCompanies(params = {}) {
-    const { limit = 20, offset = 0, search } = params;
-    let endpoint = `/rest/companies?limit=${limit}&offset=${offset}`;
-    if (search) endpoint += `&search=${encodeURIComponent(search)}`;
-    const result = await makeRequest(endpoint);
-    return { content: [{ type: "text", text: `Companies list: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function deleteCompany(id) {
-    await makeRequest(`/rest/companies/${id}`, "DELETE");
-    return { content: [{ type: "text", text: `Successfully deleted company with ID: ${id}` }] };
-  }
-  async function createNote(data) {
-    const mapped = mapNoteData(data);
-    const result = await makeRequest("/rest/notes", "POST", mapped);
-    return { content: [{ type: "text", text: `Created note: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function getNote(id) {
-    const result = await makeRequest(`/rest/notes/${id}`);
-    return { content: [{ type: "text", text: `Note details: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function listNotes(params = {}) {
-    const { limit = 20, offset = 0, search } = params;
-    let endpoint = `/rest/notes?limit=${limit}&offset=${offset}`;
-    if (search) endpoint += `&search=${encodeURIComponent(search)}`;
-    const result = await makeRequest(endpoint);
-    return { content: [{ type: "text", text: `Notes list: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function updateNote(data) {
-    const { id, ...updateData } = data;
-    const mapped = mapNoteData(updateData);
-    const result = await makeRequest(`/rest/notes/${id}`, "PUT", mapped);
-    return { content: [{ type: "text", text: `Updated note: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function deleteNote(id) {
-    await makeRequest(`/rest/notes/${id}`, "DELETE");
-    return { content: [{ type: "text", text: `Successfully deleted note with ID: ${id}` }] };
-  }
-  async function createTask(data) {
-    const mapped = mapTaskData(data);
-    const result = await makeRequest("/rest/tasks", "POST", mapped);
-    return { content: [{ type: "text", text: `Created task: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function getTask(id) {
-    const result = await makeRequest(`/rest/tasks/${id}`);
-    return { content: [{ type: "text", text: `Task details: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function listTasks(params = {}) {
-    const { limit = 20, offset = 0, status, assigneeId } = params;
-    let endpoint = `/rest/tasks?limit=${limit}&offset=${offset}`;
-    if (status) endpoint += `&status=${status}`;
-    if (assigneeId) endpoint += `&assigneeId=${assigneeId}`;
-    const result = await makeRequest(endpoint);
-    return { content: [{ type: "text", text: `Tasks list: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function updateTask(data) {
-    const { id, ...updateData } = data;
-    const mapped = mapTaskData(updateData);
-    const result = await makeRequest(`/rest/tasks/${id}`, "PUT", mapped);
-    return { content: [{ type: "text", text: `Updated task: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function deleteTask(id) {
-    await makeRequest(`/rest/tasks/${id}`, "DELETE");
-    return { content: [{ type: "text", text: `Successfully deleted task with ID: ${id}` }] };
-  }
-  async function getMetadataObjects() {
-    const result = await makeRequest("/rest/metadata/objects");
-    return { content: [{ type: "text", text: `Metadata objects: ${JSON.stringify(result, null, 2)}` }] };
-  }
-  async function getObjectMetadata(objectName) {
-    const result = await makeRequest(`/rest/metadata/objects/${objectName}`);
-    return { content: [{ type: "text", text: `Metadata for ${objectName}: ${JSON.stringify(result, null, 2)}` }] };
+  async function deleteRecord(endpoint, label, id) {
+    await makeRequest2(`${endpoint}/${id}`, "DELETE");
+    return {
+      content: [{ type: "text", text: `Deleted ${label} with ID: ${id}` }]
+    };
   }
   async function searchRecords(params) {
-    const { query, objectTypes = ["people", "companies"], limit = 10 } = params;
+    const { query, object_types, limit = 10 } = params;
+    const types = object_types ?? ["people", "companies"];
     const results = {};
-    for (const objectType of objectTypes) {
+    for (const objectType of types) {
       try {
-        const endpoint = `/rest/${objectType}?search=${encodeURIComponent(query)}&limit=${limit}`;
-        results[objectType] = await makeRequest(endpoint);
+        const url = `/rest/${objectType}?search=${encodeURIComponent(query)}&limit=${limit}`;
+        results[objectType] = await makeRequest2(url);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         results[objectType] = { error: msg };
       }
     }
-    return { content: [{ type: "text", text: `Search results for "${query}": ${JSON.stringify(results, null, 2)}` }] };
-  }
-  server2.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: [
-        // People Management
-        {
-          name: "create_person",
-          description: "Create a new person in Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              firstName: { type: "string", description: "First name" },
-              lastName: { type: "string", description: "Last name" },
-              email: { type: "string", description: "Email address" },
-              phone: { type: "string", description: "Phone number" },
-              jobTitle: { type: "string", description: "Job title" },
-              companyId: { type: "string", description: "Company ID to associate with" },
-              linkedinUrl: { type: "string", description: "LinkedIn profile URL" },
-              city: { type: "string", description: "City" },
-              avatarUrl: { type: "string", description: "Avatar image URL" }
-            },
-            required: ["firstName", "lastName"]
-          }
-        },
-        {
-          name: "get_person",
-          description: "Get details of a specific person by ID",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Person ID" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "update_person",
-          description: "Update an existing person's information",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Person ID" },
-              firstName: { type: "string", description: "First name" },
-              lastName: { type: "string", description: "Last name" },
-              email: { type: "string", description: "Email address" },
-              phone: { type: "string", description: "Phone number" },
-              jobTitle: { type: "string", description: "Job title" },
-              companyId: { type: "string", description: "Company ID" },
-              linkedinUrl: { type: "string", description: "LinkedIn profile URL" },
-              city: { type: "string", description: "City" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "list_people",
-          description: "List people with optional filtering and pagination",
-          inputSchema: {
-            type: "object",
-            properties: {
-              limit: { type: "number", description: "Number of results to return (default: 20)" },
-              offset: { type: "number", description: "Number of results to skip (default: 0)" },
-              search: { type: "string", description: "Search term for name or email" },
-              companyId: { type: "string", description: "Filter by company ID" }
-            }
-          }
-        },
-        {
-          name: "delete_person",
-          description: "Delete a person from Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Person ID to delete" }
-            },
-            required: ["id"]
-          }
-        },
-        // Company Management
-        {
-          name: "create_company",
-          description: "Create a new company in Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              name: { type: "string", description: "Company name" },
-              domainName: { type: "string", description: "Company website URL (used to fetch company icon)" },
-              address: { type: "string", description: "Company address (street)" },
-              employees: { type: "integer", description: "Number of employees" },
-              linkedinUrl: { type: "string", description: "LinkedIn company URL" },
-              xUrl: { type: "string", description: "X (Twitter) URL" },
-              annualRecurringRevenue: { type: "number", description: "Annual recurring revenue in whole dollars/euros" },
-              currencyCode: { type: "string", description: "Currency code for ARR (e.g. USD, EUR). Default: USD" },
-              idealCustomerProfile: { type: "boolean", description: "Ideal Customer Profile: whether the company is the most suitable and valuable customer" },
-              position: { type: "number", description: "Company record position" },
-              accountOwnerId: { type: "string", description: "Account owner workspace member ID (UUID)" },
-              stageFocus: { type: "array", items: { type: "string", enum: ["PRE_SEED", "SEED", "SERIES_A"] }, description: "Investment stage focus" },
-              hasFellowshipAccelerator: { type: "boolean", description: "Has fellowship/accelerator program" },
-              fundType: { type: "string", enum: ["VC", "ANGEL", "FAMILY_OFFICE", "ACCELERATOR", "OTHER"], description: "Type of fund" }
-            },
-            required: ["name"]
-          }
-        },
-        {
-          name: "get_company",
-          description: "Get details of a specific company by ID",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Company ID" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "update_company",
-          description: "Update an existing company's information",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Company ID" },
-              name: { type: "string", description: "Company name" },
-              domainName: { type: "string", description: "Company website URL (used to fetch company icon)" },
-              address: { type: "string", description: "Company address (street)" },
-              employees: { type: "integer", description: "Number of employees" },
-              linkedinUrl: { type: "string", description: "LinkedIn company URL" },
-              xUrl: { type: "string", description: "X (Twitter) URL" },
-              annualRecurringRevenue: { type: "number", description: "Annual recurring revenue in whole dollars/euros" },
-              currencyCode: { type: "string", description: "Currency code for ARR (e.g. USD, EUR). Default: USD" },
-              idealCustomerProfile: { type: "boolean", description: "Ideal Customer Profile: whether the company is the most suitable and valuable customer" },
-              position: { type: "number", description: "Company record position" },
-              accountOwnerId: { type: "string", description: "Account owner workspace member ID (UUID)" },
-              stageFocus: { type: "array", items: { type: "string", enum: ["PRE_SEED", "SEED", "SERIES_A"] }, description: "Investment stage focus" },
-              hasFellowshipAccelerator: { type: "boolean", description: "Has fellowship/accelerator program" },
-              fundType: { type: "string", enum: ["VC", "ANGEL", "FAMILY_OFFICE", "ACCELERATOR", "OTHER"], description: "Type of fund" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "list_companies",
-          description: "List companies with optional filtering and pagination",
-          inputSchema: {
-            type: "object",
-            properties: {
-              limit: { type: "number", description: "Number of results to return (default: 20)" },
-              offset: { type: "number", description: "Number of results to skip (default: 0)" },
-              search: { type: "string", description: "Search term for company name" }
-            }
-          }
-        },
-        {
-          name: "delete_company",
-          description: "Delete a company from Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Company ID to delete" }
-            },
-            required: ["id"]
-          }
-        },
-        // Notes Management
-        {
-          name: "create_note",
-          description: "Create a new note in Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              title: { type: "string", description: "Note title" },
-              body: { type: "string", description: "Note content" },
-              position: { type: "number", description: "Position for ordering" }
-            },
-            required: ["title", "body"]
-          }
-        },
-        {
-          name: "get_note",
-          description: "Get details of a specific note by ID",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Note ID" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "list_notes",
-          description: "List notes with optional filtering and pagination",
-          inputSchema: {
-            type: "object",
-            properties: {
-              limit: { type: "number", description: "Number of results to return (default: 20)" },
-              offset: { type: "number", description: "Number of results to skip (default: 0)" },
-              search: { type: "string", description: "Search term for note title or content" }
-            }
-          }
-        },
-        {
-          name: "update_note",
-          description: "Update an existing note",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Note ID" },
-              title: { type: "string", description: "Note title" },
-              body: { type: "string", description: "Note content" },
-              position: { type: "number", description: "Position for ordering" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "delete_note",
-          description: "Delete a note from Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Note ID to delete" }
-            },
-            required: ["id"]
-          }
-        },
-        // Tasks Management
-        {
-          name: "create_task",
-          description: "Create a new task in Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              title: { type: "string", description: "Task title" },
-              body: { type: "string", description: "Task description" },
-              dueAt: { type: "string", description: "Due date (ISO 8601 format)" },
-              status: { type: "string", description: "Task status", enum: ["TODO", "IN_PROGRESS", "DONE"] },
-              assigneeId: { type: "string", description: "ID of person assigned to task" },
-              position: { type: "number", description: "Position for ordering" }
-            },
-            required: ["title"]
-          }
-        },
-        {
-          name: "get_task",
-          description: "Get details of a specific task by ID",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Task ID" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "list_tasks",
-          description: "List tasks with optional filtering and pagination",
-          inputSchema: {
-            type: "object",
-            properties: {
-              limit: { type: "number", description: "Number of results to return (default: 20)" },
-              offset: { type: "number", description: "Number of results to skip (default: 0)" },
-              status: { type: "string", description: "Filter by status", enum: ["TODO", "IN_PROGRESS", "DONE"] },
-              assigneeId: { type: "string", description: "Filter by assignee ID" }
-            }
-          }
-        },
-        {
-          name: "update_task",
-          description: "Update an existing task",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Task ID" },
-              title: { type: "string", description: "Task title" },
-              body: { type: "string", description: "Task description" },
-              dueAt: { type: "string", description: "Due date (ISO 8601 format)" },
-              status: { type: "string", description: "Task status", enum: ["TODO", "IN_PROGRESS", "DONE"] },
-              assigneeId: { type: "string", description: "ID of person assigned to task" }
-            },
-            required: ["id"]
-          }
-        },
-        {
-          name: "delete_task",
-          description: "Delete a task from Twenty CRM",
-          inputSchema: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "Task ID to delete" }
-            },
-            required: ["id"]
-          }
-        },
-        // Metadata Operations
-        {
-          name: "get_metadata_objects",
-          description: "Get all object types and their metadata",
-          inputSchema: {
-            type: "object",
-            properties: {}
-          }
-        },
-        {
-          name: "get_object_metadata",
-          description: "Get metadata for a specific object type",
-          inputSchema: {
-            type: "object",
-            properties: {
-              objectName: { type: "string", description: "Object name (e.g., 'people', 'companies')" }
-            },
-            required: ["objectName"]
-          }
-        },
-        // Search
-        {
-          name: "search_records",
-          description: "Search across multiple object types",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", description: "Search query" },
-              objectTypes: {
-                type: "array",
-                items: { type: "string" },
-                description: "Object types to search (e.g., ['people', 'companies'])"
-              },
-              limit: { type: "number", description: "Number of results per object type" }
-            },
-            required: ["query"]
-          }
-        }
-      ]
+      content: [{ type: "text", text: `Search results for "${query}": ${JSON.stringify(results, null, 2)}` }]
     };
-  });
+  }
+  server2.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools2 }));
   server2.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const entry = dispatch2.get(name);
+    if (!entry) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
     try {
-      switch (name) {
-        // People
-        case "create_person":
-          return await createPerson(args);
-        case "get_person":
-          return await getPerson(args.id);
-        case "update_person":
-          return await updatePerson(args);
-        case "list_people":
-          return await listPeople(args);
-        case "delete_person":
-          return await deletePerson(args.id);
-        // Companies
-        case "create_company":
-          return await createCompany(args);
-        case "get_company":
-          return await getCompany(args.id);
-        case "update_company":
-          return await updateCompany(args);
-        case "list_companies":
-          return await listCompanies(args);
-        case "delete_company":
-          return await deleteCompany(args.id);
-        // Notes
-        case "create_note":
-          return await createNote(args);
-        case "get_note":
-          return await getNote(args.id);
-        case "list_notes":
-          return await listNotes(args);
-        case "update_note":
-          return await updateNote(args);
-        case "delete_note":
-          return await deleteNote(args.id);
-        // Tasks
-        case "create_task":
-          return await createTask(args);
-        case "get_task":
-          return await getTask(args.id);
-        case "list_tasks":
-          return await listTasks(args);
-        case "update_task":
-          return await updateTask(args);
-        case "delete_task":
-          return await deleteTask(args.id);
-        // Metadata
-        case "get_metadata_objects":
-          return await getMetadataObjects();
-        case "get_object_metadata":
-          return await getObjectMetadata(args.objectName);
-        // Search
-        case "search_records":
-          return await searchRecords(args);
+      const a = args ?? {};
+      switch (entry.action) {
+        case "create":
+          return await createRecord(entry.endpoint, entry.labelSingular, a);
+        case "get":
+          return await getRecord(entry.endpoint, entry.labelSingular, a.id);
+        case "update": {
+          const { id, ...data } = a;
+          return await updateRecord(entry.endpoint, entry.labelSingular, id, data);
+        }
+        case "list":
+          return await listRecords(entry.endpoint, entry.labelPlural, a);
+        case "delete":
+          return await deleteRecord(entry.endpoint, entry.labelSingular, a.id);
+        case "search":
+          return await searchRecords(a);
         default:
-          throw new Error(`Unknown tool: ${name}`);
+          throw new Error(`Unknown action: ${entry.action}`);
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -643,10 +379,23 @@ function createServer({ apiKey, baseUrl = "https://api.twenty.com" }) {
 }
 
 // index.ts
-var server = createServer({
-  apiKey: process.env.TWENTY_API_KEY,
-  baseUrl: process.env.TWENTY_BASE_URL
-});
+var apiKey = process.env.TWENTY_API_KEY;
+var baseUrl = process.env.TWENTY_BASE_URL || "https://api.twenty.com";
+async function makeRequest(endpoint) {
+  const res = await fetch(`${baseUrl}${endpoint}`, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    }
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+console.error("Fetching Twenty CRM schema...");
+var objects = await fetchSchema(makeRequest);
+var { tools, dispatch } = generateTools(objects);
+console.error(`Discovered ${objects.length} objects, generated ${tools.length} tools`);
+var server = createServer({ apiKey, baseUrl, tools, dispatch });
 var transport = new StdioServerTransport();
 await server.connect(transport);
 console.error("Twenty CRM MCP server running on stdio");
