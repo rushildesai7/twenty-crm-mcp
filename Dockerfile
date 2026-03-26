@@ -5,19 +5,15 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-COPY tsconfig.json ./
+COPY tsup.config.ts tsconfig.json ./
 COPY src/ ./src/
 COPY index.ts serve.ts ./
-RUN npm run build
+RUN npx tsup
 
 FROM node:20-slim
 
 WORKDIR /app
-
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
-
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/dist/serve.js ./serve.js
 
 ENV PORT=3000
 EXPOSE 3000
@@ -25,4 +21,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD node -e "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)})" || exit 1
 
-CMD ["node", "dist/serve.js"]
+CMD ["node", "serve.js"]

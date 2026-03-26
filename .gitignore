@@ -48,7 +48,7 @@ tmp/
 temp/
 
 # Build output
-dist/
+dist/serve.js
 
 # Cloudflare Workers
 .wrangler/
